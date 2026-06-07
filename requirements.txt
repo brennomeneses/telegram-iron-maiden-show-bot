@@ -1,0 +1,4 @@
+python-telegram-bot[job-queue]==21.6
+playwright==1.44.0
+beautifulsoup4==4.12.3
+python-dotenv==1.0.1
