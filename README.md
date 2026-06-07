@@ -1,54 +1,151 @@
-#!/bin/bash
-# setup.sh – Cria o ambiente virtual e instala as dependências
+# 🤘 Iron Maiden Ticket Monitor Bot
 
-set -e
+Bot do Telegram que monitora disponibilidade de ingressos para:
 
-echo "🤘 Iron Maiden Ticket Monitor – Setup"
-echo "======================================"
+**Iron Maiden – Run For Your Lives World Tour 2026**  
+📅 28/10/2026 | 🏟️ Arena da Baixada – Curitiba/PR
 
-# Verifica Python 3
-if ! command -v python3 &> /dev/null; then
-    echo "❌ Python 3 não encontrado. Instale em: https://python.org"
-    exit 1
-fi
-echo "✅ Python: $(python3 --version)"
+## 📡 O que ele monitora
 
-# Cria o venv se não existir
-if [ ! -d "venv" ]; then
-    echo "📦 Criando ambiente virtual..."
-    python3 -m venv venv
-else
-    echo "♻️  Ambiente virtual já existe, reutilizando..."
-fi
+| Site | Tipo | O que verifica |
+|------|------|----------------|
+| **BuyTicket** | Mercado secundário | Aparecimento de ingressos à venda por revendedores |
+| **Livepass** | Venda oficial | Abertura de novo lote ou início das vendas gerais |
 
-# Ativa o venv
-source venv/bin/activate
+---
 
-# Atualiza pip
-pip install --upgrade pip -q
+## ⚙️ Configuração
 
-# Instala dependências Python
-echo "📥 Instalando dependências Python..."
-pip install -r requirements.txt -q
+### 1. Crie seu bot no Telegram
 
-# Instala o Chromium do Playwright (necessário para scraping da Livepass)
-echo "🌐 Instalando Chromium (Playwright)..."
-playwright install chromium
+1. Abra o Telegram e procure por `@BotFather`
+2. Envie `/newbot` e siga as instruções
+3. Copie o **token** gerado (formato: `123456789:ABCdef...`)
 
-# Cria o .env se não existir
-if [ ! -f ".env" ]; then
-    cp .env.example .env
-    echo ""
-    echo "⚙️  Arquivo .env criado. Edite e coloque seu token:"
-    echo "   nano .env"
-else
-    echo "✅ Arquivo .env já existe."
-fi
+### 2. Instale as dependências
 
-echo ""
-echo "======================================"
-echo "✅ Setup concluído!"
-echo ""
-echo "Para rodar o bot:"
-echo "  source venv/bin/activate"
-echo "  python bot.py"
+```bash
+# Clone ou baixe os arquivos do bot
+cd iron_maiden_bot
+
+# Crie um ambiente virtual (recomendado)
+python -m venv venv
+source venv/bin/activate        # Linux/Mac
+# ou
+venv\Scripts\activate           # Windows
+
+# Instale as dependências
+pip install -r requirements.txt
+```
+
+### 3. Configure o token
+
+```bash
+# Copie o arquivo de exemplo
+cp .env.example .env
+
+# Edite o .env e coloque seu token
+TELEGRAM_BOT_TOKEN=seu_token_aqui
+CHECK_INTERVAL_SECONDS=300
+```
+
+### 4. Execute o bot
+
+```bash
+# Opção A: exportar variável de ambiente e rodar
+export TELEGRAM_BOT_TOKEN="seu_token_aqui"
+python bot.py
+
+# Opção B: usar o arquivo .env com python-dotenv
+pip install python-dotenv
+# e adicione ao início do bot.py:
+# from dotenv import load_dotenv; load_dotenv()
+python bot.py
+```
+
+---
+
+## 🤖 Comandos disponíveis
+
+| Comando | Descrição |
+|---------|-----------|
+| `/start` | Menu principal com botões |
+| `/check` | Verificar disponibilidade agora |
+| `/subscribe` | Ativar alertas automáticos |
+| `/unsubscribe` | Desativar alertas |
+| `/status` | Ver se seus alertas estão ativos |
+| `/links` | Links diretos para compra |
+| `/help` | Lista de comandos |
+
+---
+
+## ☁️ Rodando 24/7 (servidor)
+
+Para o bot funcionar continuamente, você precisa de um servidor.
+Opções gratuitas ou baratas:
+
+### Opção A – Railway (fácil, gratuito com limites)
+1. Acesse [railway.app](https://railway.app)
+2. Crie um novo projeto → "Deploy from GitHub" ou suba os arquivos
+3. Adicione a variável de ambiente `TELEGRAM_BOT_TOKEN` nas configurações
+
+### Opção B – VPS (DigitalOcean, Contabo, etc.)
+```bash
+# Instale como serviço systemd
+sudo nano /etc/systemd/system/ironmaiden-bot.service
+```
+```ini
+[Unit]
+Description=Iron Maiden Ticket Monitor Bot
+After=network.target
+
+[Service]
+Type=simple
+User=seu_usuario
+WorkingDirectory=/home/seu_usuario/iron_maiden_bot
+Environment=TELEGRAM_BOT_TOKEN=seu_token_aqui
+Environment=CHECK_INTERVAL_SECONDS=300
+ExecStart=/home/seu_usuario/iron_maiden_bot/venv/bin/python bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+```bash
+sudo systemctl enable ironmaiden-bot
+sudo systemctl start ironmaiden-bot
+sudo systemctl status ironmaiden-bot
+```
+
+### Opção C – PM2 (Node.js process manager com suporte a Python)
+```bash
+npm install -g pm2
+pm2 start bot.py --interpreter python3 --name "ironmaiden-bot"
+pm2 save
+pm2 startup
+```
+
+---
+
+## ⚠️ Observações importantes
+
+- **BuyTicket** é um mercado *secundário* (revendedores). Pode ter ingressos acima do preço oficial.
+- **Livepass** é a venda *oficial*. O bot detecta quando novos lotes abrirem.
+- O bot verifica a cada **5 minutos** por padrão. Reduza para 2 minutos (`120`) se quiser mais agilidade, mas não menos que isso para não ser bloqueado pelos sites.
+- Os arquivos `subscribers.json` e `bot.log` são criados automaticamente na primeira execução.
+- A Livepass usa bastante JavaScript; o bot captura o que está no HTML estático e tenta a API interna. Em alguns casos pode indicar "status indefinido" — sinal para verificar manualmente.
+
+---
+
+## 🛠️ Estrutura dos arquivos
+
+```
+iron_maiden_bot/
+├── bot.py           # Bot do Telegram (handlers, alertas)
+├── monitor.py       # Scraping do BuyTicket e Livepass
+├── requirements.txt # Dependências Python
+├── .env.example     # Modelo de configuração
+├── subscribers.json # Gerado automaticamente (lista de usuários)
+└── bot.log          # Gerado automaticamente (logs)
+```
