@@ -175,6 +175,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Formatação de status
 # ──────────────────────────────────────────────
 
+def _fmt_ticket(t: dict) -> str:
+    """Formata uma linha de ingresso: '✅ Disponível! PISTA – INTEIRA • R$ 580,00'"""
+    sector = t.get("sector", "")
+    ttype  = t.get("type", "")
+    tprice = t.get("price")
+    label  = f"{sector} – {ttype}".strip(" –") if sector else ttype
+    price_str = f" • R$ {tprice:.2f}" if tprice else ""
+    return f"   ✅ Disponível! *{label}*{price_str}"
+
+
 def format_status(result: dict) -> str:
     now = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
     lines = [
@@ -187,18 +197,14 @@ def format_status(result: dict) -> str:
     bt_ok = bt.get("available", False)
     bt_icon = "🟢" if bt_ok else "🔴"
     lines.append(f"{bt_icon} *BuyTicket* (revenda)")
-    if bt_ok:
+    if bt.get("error"):
+        lines.append(f"   ⚠️ {bt['error']}")
+    elif bt_ok:
         price = bt.get("min_price")
         count = bt.get("ticket_count")
-        if price:
-            lines.append(f"   💰 A partir de R$ {price:.2f}")
-        if count:
-            lines.append(f"   🎟️ {count} ingresso(s) disponível(is)")
+        lines.append(f"   ✅ Disponível! *{count} ingresso(s)*" + (f" • R$ {price:.2f}" if price else ""))
     else:
-        msg = bt.get("message", "Sem ingressos disponíveis no momento")
-        lines.append(f"   ℹ️ {msg}")
-    if bt.get("error"):
-        lines.append(f"   ⚠️ Erro: {bt['error']}")
+        lines.append(f"   ℹ️ {bt.get('message', 'Sem ingressos no momento')}")
     lines.append("")
 
     # Livepass
@@ -209,22 +215,14 @@ def format_status(result: dict) -> str:
     if lp.get("error"):
         lines.append(f"   ⚠️ {lp['error']}")
     elif lp_ok:
-        price = lp.get("min_price")
-        if price:
-            lines.append(f"   💰 A partir de R$ {price:.2f}")
         tickets = lp.get("tickets", [])
         available = [t for t in tickets if "indisponível" not in t.get("status", "").lower()]
-        for t in available[:6]:
-            sector = t.get("sector", "")
-            ttype  = t.get("type", "")
-            tprice = t.get("price")
-            tstatus = t.get("status", "")
-            label = f"{sector} – {ttype}".strip(" –") if sector else ttype
-            price_str = f"R$ {tprice:.2f}" if tprice else ""
-            lines.append(f"   ✅ {label} {price_str} • {tstatus}")
+        for t in available[:8]:
+            lines.append(_fmt_ticket(t))
+        if len(available) > 8:
+            lines.append(f"   ✅ ...e mais {len(available) - 8} tipo(s)")
     else:
-        msg = lp.get("message", "Indisponível no momento")
-        lines.append(f"   ℹ️ {msg}")
+        lines.append(f"   ℹ️ {lp.get('message', 'Indisponível no momento')}")
         tickets = lp.get("tickets", [])
         if tickets:
             lines.append(f"   📋 {len(tickets)} tipo(s) monitorado(s), todos indisponíveis")
@@ -273,14 +271,22 @@ async def periodic_check(context: ContextTypes.DEFAULT_TYPE):
     lp_was_available = lp_prev.get("available", False)
 
     if lp_available and not lp_was_available:
-        lots = lp.get("lots", [])
-        msg = "🚨 *NOVO LOTE ABERTO NA LIVEPASS!*\n\n"
-        msg += "🎸 Iron Maiden – Curitiba 28/10/2026\n"
-        for lot in lots:
-            msg += f"🎟️ {lot}\n"
+        tickets = lp.get("tickets", [])
+        available = [t for t in tickets if "indisponível" not in t.get("status", "").lower()]
+        msg = "🚨 *INGRESSOS DISPONÍVEIS NA LIVEPASS!*\n\n"
+        msg += "🎸 Iron Maiden – Curitiba 28/10/2026\n\n"
+        for t in available[:8]:
+            sector = t.get("sector", "")
+            ttype  = t.get("type", "")
+            tprice = t.get("price")
+            label  = f"{sector} – {ttype}".strip(" –") if sector else ttype
+            price_str = f" • R$ {tprice:.2f}" if tprice else ""
+            msg += f"✅ Disponível! *{label}*{price_str}\n"
+        if len(available) > 8:
+            msg += f"✅ ...e mais {len(available) - 8} tipo(s)\n"
         price = lp.get("min_price")
         if price:
-            msg += f"💰 A partir de R$ {price:.2f}\n"
+            msg += f"\n💰 A partir de R$ {price:.2f}\n"
         msg += "\n[👉 Comprar agora na Livepass](https://www.livepass.com.br/event/iron-maiden-run-for-your-lives-world-tour-2026-cwb-arena-da-baixada-21684448/)"
         alerts.append(msg)
 

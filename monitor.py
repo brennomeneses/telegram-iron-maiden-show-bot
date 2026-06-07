@@ -1,10 +1,16 @@
 """
-monitor.py – Scraping de ingressos para Iron Maiden Curitiba 2026
+monitor.py – Iron Maiden Curitiba 2026
+
+Livepass: Playwright para carregar a página (contorna bloqueios de sessão/cookie),
+          BeautifulSoup com seletores data-qa exatos para parsear o HTML.
+
+BuyTicket: Playwright (Next.js).
 """
 
 import re
 import logging
 import asyncio
+from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
 logger = logging.getLogger(__name__)
@@ -19,18 +25,14 @@ BUYTICKET_URL = (
 LIVEPASS_URL = (
     "https://www.livepass.com.br/event/"
     "iron-maiden-run-for-your-lives-world-tour-2026-cwb-arena-da-baixada-21684448/"
+    "?promo_id=186816"
 )
 
 STEALTH_ARGS = [
     "--disable-blink-features=AutomationControlled",
-    "--no-sandbox",
-    "--disable-setuid-sandbox",
-    "--disable-dev-shm-usage",
-    "--disable-accelerated-2d-canvas",
-    "--no-first-run",
-    "--no-zygote",
-    "--disable-gpu",
-    "--lang=pt-BR",
+    "--no-sandbox", "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage", "--disable-gpu",
+    "--no-first-run", "--no-zygote", "--lang=pt-BR",
 ]
 
 
@@ -46,14 +48,11 @@ async def _new_stealth_context(pw):
         timezone_id="America/Sao_Paulo",
         viewport={"width": 1366, "height": 768},
         extra_http_headers={
-            "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "sec-ch-ua": '"Chromium";v="125", "Google Chrome";v="125", "Not-A.Brand";v="99"',
+            "Accept-Language": "pt-BR,pt;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+            "sec-ch-ua": '"Chromium";v="125", "Google Chrome";v="125"',
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": '"Windows"',
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
             "Upgrade-Insecure-Requests": "1",
         },
         ignore_https_errors=True,
@@ -84,137 +83,111 @@ class TicketMonitor:
                 browser, ctx = await _new_stealth_context(pw)
                 page = await ctx.new_page()
 
-                logger.info("Livepass: abrindo página...")
+                logger.info("Livepass: carregando...")
+
+                # domcontentloaded evita ERR_HTTP2 do networkidle
+                # timeout generoso pois a Livepass pode ser lenta
+                await page.goto(LIVEPASS_URL, wait_until="domcontentloaded", timeout=90_000)
+
+                # Espera pelo menos um card de ingresso aparecer no DOM
                 try:
-                    await page.goto(LIVEPASS_URL, wait_until="networkidle", timeout=60_000)
-                except Exception as e:
-                    if "net::" in str(e) or "ERR_HTTP2" in str(e):
-                        logger.warning(f"Livepass network error, retrying: {e}")
-                        await page.goto(LIVEPASS_URL, wait_until="domcontentloaded", timeout=60_000)
-                        await page.wait_for_timeout(5000)
-                    else:
-                        raise
+                    await page.wait_for_selector(
+                        '[data-qa="price-category"]',
+                        state="attached",
+                        timeout=20_000,
+                    )
+                except PWTimeout:
+                    logger.warning("Livepass: [data-qa='price-category'] não apareceu, tentando ler assim mesmo")
 
-                # ── Encontra e clica no dropdown de modalidade ──
-                # O log mostrou que o único <select> visível é #language-selection
-                # O dropdown de modalidade é um componente customizado (div/button)
-                # Tentamos múltiplas estratégias em ordem
+                # Pequena pausa para renderização completa
+                await page.wait_for_timeout(1500)
 
-                selected_venda_geral = await self._select_venda_geral(page)
-                if selected_venda_geral:
-                    await page.wait_for_timeout(2500)
-
-                content = await page.inner_text("body")
+                html = await page.content()
                 await browser.close()
 
-            tickets = self._parse_livepass_text(content)
+            tickets = self._parse_livepass_html(html)
             result["tickets"] = tickets
 
             available = [
                 t for t in tickets
-                if "indisponível" not in t.get("status", "").lower()
-                and t.get("status", "").strip() != ""
+                if "indisponível" not in t["status"].lower()
+                and t["status"].strip() != ""
             ]
-            prices = [t["price"] for t in tickets if t.get("price")]
+            prices = [t["price"] for t in tickets if t["price"]]
 
             if available:
                 result["available"] = True
                 result["message"] = f"{len(available)} tipo(s) disponível(is)"
-                if prices:
-                    result["min_price"] = min(prices)
+                result["min_price"] = min(prices) if prices else None
             elif tickets:
-                result["message"] = f"{len(tickets)} setor(es) monitorado(s) — todos indisponíveis"
-                if prices:
-                    result["min_price"] = min(prices)
+                result["message"] = f"{len(tickets)} tipo(s) — todos indisponíveis"
+                result["min_price"] = min(prices) if prices else None
             else:
-                result["message"] = "Aguardando abertura de vendas"
+                result["message"] = "Sem dados — verifique manualmente"
+
+            logger.info(f"Livepass: {len(tickets)} ingressos, {len(available)} disponíveis")
 
         except PWTimeout:
-            result["error"] = "Timeout ao carregar Livepass (>60s)"
+            result["error"] = "Timeout ao carregar Livepass (>90s)"
         except Exception as e:
             logger.exception("Erro no check_livepass")
             result["error"] = str(e)[:200]
 
         return result
 
-    async def _select_venda_geral(self, page) -> bool:
+    def _parse_livepass_html(self, html: str) -> list:
         """
-        Seleciona 'VENDA GERAL' no <select data-qa="promo-selection-box">.
-        HTML real:
-          <select name="promo_id" data-qa="promo-selection-box" ...>
-            <option value="">Selecione</option>
-            <option value="186439">SÓCIO FURACÃO</option>
-            <option value="186816">VENDA GERAL</option>
-          </select>
-        """
-        try:
-            sel = page.locator('[data-qa="promo-selection-box"]')
-            await sel.wait_for(state="attached", timeout=15_000)
+        Seletores data-qa exatos do HTML real da Livepass:
 
-            # Seleciona pelo value fixo (186816) com fallback pelo label
-            try:
-                await sel.select_option(value="186816")
-            except Exception:
-                await sel.select_option(label="VENDA GERAL")
+          <div data-qa="price-category">
+            <div class="pc-list-category"><span>PISTA PREMIUM</span></div>
+            <div data-qa="tickettype" data-tt-name="INTEIRA">
+              <div data-qa="tickettypeItem-price">R$ 890,00</div>
+              <div data-qa="ticket-type-availability-hint">Indisponível no momento</div>
+            </div>
+          </div>
 
-            logger.info("Livepass: selecionou VENDA GERAL via [data-qa='promo-selection-box']")
-            return True
-        except Exception as e:
-            logger.warning(f"Livepass: falha ao selecionar VENDA GERAL: {e}")
-            return False
-
-    def _parse_livepass_text(self, text: str) -> list:
+        Quando disponível: ticket-type-availability-hint SOME e o stepper aparece.
         """
-        Parse do texto da página Livepass.
-        Estrutura real (imagem):
-          PISTA PREMIUM
-            INTEIRA          R$ 890,00   Indisponível no momento
-            MEIA ENTRADA     R$ 445,00   Indisponível no momento
-        """
+        soup = BeautifulSoup(html, "lxml")
         tickets = []
-        lines = [l.strip() for l in text.splitlines() if l.strip()]
 
-        sector_keywords = [
-            "PISTA PREMIUM", "PISTA", "CADEIRA", "CAMAROTE",
-            "VIP", "ARQUIBANCADA", "TRIBUNA", "MEZANINO",
-        ]
-        price_re = re.compile(r"R\$\s*(\d{1,3}(?:[.,]\d{3})*,\d{2})")
-        current_sector = ""
+        for card in soup.select('[data-qa="price-category"]'):
+            sector_el = card.select_one(".pc-list-category span")
+            sector = sector_el.get_text(strip=True) if sector_el else ""
 
-        i = 0
-        while i < len(lines):
-            line_upper = lines[i].upper()
+            for tt in card.select('[data-qa="tickettype"]'):
+                # Nome — atributo data-tt-name é o mais limpo
+                name = tt.get("data-tt-name", "").strip()
+                if not name:
+                    span = tt.select_one(".ticket-type-title span")
+                    name = span.get_text(strip=True) if span else ""
 
-            # Linha de setor (keyword sem preço)
-            if any(kw in line_upper for kw in sector_keywords) and not price_re.search(lines[i]):
-                current_sector = lines[i].strip()
-                i += 1
-                continue
+                # Preço
+                price_el = tt.select_one('[data-qa="tickettypeItem-price"]')
+                price_val = None
+                if price_el:
+                    raw = price_el.get_text(strip=True).replace("\xa0", "")
+                    m = re.search(r"(\d{1,3}(?:[.,]\d{3})*,\d{2})", raw)
+                    if m:
+                        price_val = float(m.group(1).replace(".", "").replace(",", "."))
 
-            # Linha com preço
-            m = price_re.search(lines[i])
-            if m and current_sector:
-                ticket_type = lines[i][:m.start()].strip()
-                price_val = float(m.group(1).replace(".", "").replace(",", "."))
+                # Status
+                hint_el = tt.select_one('[data-qa="ticket-type-availability-hint"]')
+                print(f"DEBUG: name='{name}', price='{price_val}', hint='{hint_el.get_text(strip=True) if hint_el else 'N/A'}'")
+                if hint_el:
+                    status = hint_el.get_text(strip=True)
+                else:
+                    # Sem hint = disponível (stepper aparece no lugar)
+                    status = "Disponível"
 
-                status = lines[i][m.end():].strip()
-                if not status and i + 1 < len(lines):
-                    nxt = lines[i + 1].strip().lower()
-                    if any(k in nxt for k in ["indisponível", "disponível", "esgotado", "comprar", "adicionar"]):
-                        status = lines[i + 1].strip()
-                        i += 1
-
-                if not status:
-                    status = "Indisponível no momento"
-
-                tickets.append({
-                    "sector": current_sector,
-                    "type": ticket_type,
-                    "price": price_val,
-                    "status": status,
-                })
-
-            i += 1
+                if name:
+                    tickets.append({
+                        "sector": sector,
+                        "type": name,
+                        "price": price_val,
+                        "status": status,
+                    })
 
         return tickets
 
@@ -236,7 +209,7 @@ class TicketMonitor:
                 browser, ctx = await _new_stealth_context(pw)
                 page = await ctx.new_page()
 
-                logger.info("BuyTicket: abrindo página...")
+                logger.info("BuyTicket: carregando...")
                 await page.goto(BUYTICKET_URL, wait_until="networkidle", timeout=60_000)
                 await page.wait_for_timeout(2000)
 
@@ -247,8 +220,7 @@ class TicketMonitor:
             prices = []
             for m in price_re.finditer(content):
                 try:
-                    clean = m.group(1).replace(".", "").replace(",", ".")
-                    val = float(clean)
+                    val = float(m.group(1).replace(".", "").replace(",", "."))
                     if 100 <= val <= 50_000:
                         prices.append(val)
                 except ValueError:
@@ -275,7 +247,7 @@ class TicketMonitor:
         return result
 
     # ──────────────────────────────────────────
-    # Verifica os dois
+    # Verifica os dois em paralelo
     # ──────────────────────────────────────────
 
     async def check_all(self) -> dict:
